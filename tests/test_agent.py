@@ -163,6 +163,7 @@ def runner():
     a.screenshots = False
     a.pending_text = None
     a.secret = None
+    a.expect = ()
     a.origin = "https://example.test"
     p = page()
     a.state = {
@@ -372,3 +373,32 @@ def test_secret_field_without_secret_blocks_before_any_model_call(runner, monkey
     assert "--secret-env" in runner.state["blocked_reason"]
     helper.assert_not_called()
     runner.state["browser"].act.assert_not_called()
+
+
+@pytest.mark.parametrize("settled, fresh", [(False, True), (True, False)])
+def test_done_is_rejected_until_the_page_has_settled_unchanged(runner, settled, fresh):
+    runner.state["decision"] = decision("DONE")
+    runner.state["browser"].settle = Mock(return_value=settled)
+    runner.state["browser"].fresh.return_value = fresh
+    with pytest.raises(StalePage):
+        runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "ready"
+
+
+@pytest.mark.parametrize("expected, status", [(["Search"], "done"), (["Search", "Parcours"], "unverified")])
+def test_done_requires_every_expected_text_on_the_page(runner, expected, status):
+    runner.expect = expected
+    runner.state["decision"] = decision("DONE")
+    runner.state["browser"].settle = Mock(return_value=True)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == status
+    assert runner.state.get("missing_expect", []) == [t for t in expected if t != "Search"]
+
+
+def test_each_action_waits_for_the_page_to_settle_before_observing(runner):
+    order = []
+    runner.state["browser"].settle = Mock(side_effect=lambda: order.append("settle") or True)
+    runner.state["browser"].observe.side_effect = lambda **_: order.append("observe") or runner.state["page"]
+    runner.state["decision"] = decision("e3")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert order == ["settle", "observe"]

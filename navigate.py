@@ -19,7 +19,7 @@ Otherwise a Chrome already listening on `--chrome-port` is reused and ALSO left 
 none answers, this script launches its own (dedicated profile) and kills it on exit. It
 never kills a Chrome it did not start.
 
-Exit codes: 0 = done, 2 = blocked, 3 = error/exception.
+Exit codes: 0 = done, 2 = blocked, 3 = error/exception, 4 = done claimed but an --expect text is missing.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ import time
 import urllib.request
 
 from jev_ultrafast import Agent
+from jev_ultrafast.agent import STOPPED
 
 PAGE_KEYS = ("url", "title", "fingerprint")
 
@@ -109,6 +110,8 @@ def main() -> int:
     parser.add_argument("--secret-env", metavar="VAR",
                         help="env var holding the password; typed by code on the start origin only, "
                              "never sent to a model nor written to the trace")
+    parser.add_argument("--expect", action="append", default=[], metavar="TEXT",
+                        help="text that must be visible for DONE to count (repeatable); else status=unverified")
     args = parser.parse_args()
 
     out = pathlib.Path(args.out).expanduser().resolve()
@@ -135,9 +138,9 @@ def main() -> int:
             secret = os.environ.get(args.secret_env)
             if not secret:
                 raise ValueError(f"--secret-env {args.secret_env}: variable is unset or empty")
-        with Agent(args.url, args.goal, record_dir=out, secret=secret) as agent:
+        with Agent(args.url, args.goal, record_dir=out, secret=secret, expect=args.expect) as agent:
             browser = agent.browser
-            while agent.state["status"] not in {"done", "blocked"}:
+            while agent.state["status"] not in STOPPED:
                 state = agent.command("tick")
                 console_entries += agent.browser.console_events()
                 page = state.get("page") or page
@@ -193,6 +196,8 @@ def main() -> int:
         "chrome_launched_by_us": chrome_proc is not None or (cdp_url is not None and args.keep_chrome),
         "chrome_left_running": bool(args.keep_chrome and cdp_url),
         "steps_executed": logged,
+        "expect": args.expect,
+        "missing_expect": final.get("missing_expect", []),
         "blocked_reason": final.get("blocked_reason"),
         "wall_ms": round((time.time() - started) * 1000),
         "final_page": {k: page.get(k) for k in PAGE_KEYS if k in page},
@@ -211,7 +216,7 @@ def main() -> int:
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print(json.dumps(summary, ensure_ascii=False))
-    return {"done": 0, "blocked": 2}.get(status, 3)
+    return {"done": 0, "blocked": 2, "unverified": 4}.get(status, 3)
 
 
 if __name__ == "__main__":

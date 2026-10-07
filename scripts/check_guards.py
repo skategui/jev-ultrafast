@@ -126,6 +126,13 @@ def main():
         assert value == "Generated", repr(value)
         assert any(a.get("role") == "option" for a in page["actions"])
         passed.append("real text input waits for asynchronous combobox suggestions")
+        assert browser.evaluate("(() => { fetch('data:,x'); return window.__jevNet?.inflight })()") == 1
+        assert browser.settle()
+        browser.evaluate("window.__jevNet.inflight = 1")
+        assert not browser.settle(timeout=0.5), "a request in flight must keep the page unsettled"
+        browser.evaluate("window.__jevNet.inflight = 0")
+        assert browser.settle()
+        passed.append("settle waits for in-flight requests on a navigated document")
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")

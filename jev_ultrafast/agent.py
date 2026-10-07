@@ -3,19 +3,28 @@
 import base64
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .browser import Browser, StalePage
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
 
+def origin(url):
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 class Agent:
-    def __init__(self, url, goals, *, record_dir=None, screenshots=False):
+    def __init__(self, url, goals, *, record_dir=None, screenshots=False, secret=None):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
             raise ValueError("Supply a task")
         plan = [task]
         self.pending_text = None
+        # The secret never reaches a model, the trace or the summary; it is typed only on the start origin.
+        self.secret = secret
+        self.origin = origin(url)
         self.browser = Browser(url)
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
@@ -103,7 +112,14 @@ class Agent:
                 state["status"] = "blocked"
                 raise ValueError(f"Stopped at the {MAX_STEPS}-action demo budget")
             text, helper = None, None
-            if action["kind"] == "fill":
+            if action.get("secret"):
+                reason = self.secret_refusal(page)
+                if reason:
+                    state["status"], state["blocked_reason"] = "blocked", reason
+                    state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                    return self.snapshot()
+                text = self.secret
+            elif action["kind"] == "fill":
                 if not state["browser"].fresh(page):
                     raise StalePage("Page changed before text generation. Choose again.")
                 context = field_context(state["goal"], action, page, state["history"])
@@ -127,7 +143,7 @@ class Agent:
                     "probability": decision["probabilities"][selected],
                     "confidence": decision["confidence"],
                     "latency_ms": decision["latency_ms"],
-                    "text": text,
+                    "text": "***" if action.get("secret") else text,
                     "text_helper": helper["model"] if helper else None,
                     "text_latency_ms": helper["latency_ms"] if helper else 0,
                     "operation": decision["operation"],
@@ -159,6 +175,13 @@ class Agent:
         else:
             raise ValueError("Unknown command")
         return self.snapshot()
+
+    def secret_refusal(self, page):
+        if self.secret is None:
+            return "Password field needs a secret: pass --secret-env VAR. Nothing typed."
+        if origin(page["url"]) != self.origin:
+            return f"Secret refused: {origin(page['url'])} is not the start origin {self.origin}."
+        return None
 
     def run(self):
         while self.state["status"] not in {"done", "blocked"}:

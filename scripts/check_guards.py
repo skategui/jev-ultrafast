@@ -105,6 +105,8 @@ def main():
             assert {a["kind"] for a in actions if a.get("role") == role} == {"click"}
         assert {a["kind"] for a in actions if a["label"] == "Read only"} == {"click"}
         assert not any(a["label"] == "Disabled" or a.get("value") == "never expose this" for a in actions)
+        assert "never expose this" not in repr(page)
+        assert [a["value"] for a in actions if a.get("secret") and a["kind"] == "fill"] == ["[filled]"]
         assert [a["value"] for a in actions if a["kind"] == "select"] == ["Design"]
         passed.append("native controls expose only supported operations and safe values")
 

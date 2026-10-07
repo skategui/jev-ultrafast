@@ -106,6 +106,9 @@ def main() -> int:
     parser.add_argument("--keep-chrome", action="store_true",
                         help="leave our own Chrome running (interactive debugging)")
     parser.add_argument("--quiet", action="store_true", help="no per-step stdout")
+    parser.add_argument("--secret-env", metavar="VAR",
+                        help="env var holding the password; typed by code on the start origin only, "
+                             "never sent to a model nor written to the trace")
     args = parser.parse_args()
 
     out = pathlib.Path(args.out).expanduser().resolve()
@@ -127,7 +130,12 @@ def main() -> int:
     try:
         cdp_url, chrome_proc = ensure_chrome(args.chrome_port, args.chrome_profile,
                                              args.chrome, args.keep_chrome)
-        with Agent(args.url, args.goal, record_dir=out) as agent:
+        secret = None
+        if args.secret_env:
+            secret = os.environ.get(args.secret_env)
+            if not secret:
+                raise ValueError(f"--secret-env {args.secret_env}: variable is unset or empty")
+        with Agent(args.url, args.goal, record_dir=out, secret=secret) as agent:
             browser = agent.browser
             while agent.state["status"] not in {"done", "blocked"}:
                 state = agent.command("tick")
@@ -185,6 +193,7 @@ def main() -> int:
         "chrome_launched_by_us": chrome_proc is not None or (cdp_url is not None and args.keep_chrome),
         "chrome_left_running": bool(args.keep_chrome and cdp_url),
         "steps_executed": logged,
+        "blocked_reason": final.get("blocked_reason"),
         "wall_ms": round((time.time() - started) * 1000),
         "final_page": {k: page.get(k) for k in PAGE_KEYS if k in page},
         "text_calls": [

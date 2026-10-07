@@ -162,6 +162,8 @@ def runner():
     a = loop.Agent.__new__(loop.Agent)
     a.screenshots = False
     a.pending_text = None
+    a.secret = None
+    a.origin = "https://example.test"
     p = page()
     a.state = {
         "browser": Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p)),
@@ -317,4 +319,56 @@ def test_navigation_during_prediction_reobserves_without_action(runner):
     runner.command("tick")
     assert runner.state["status"] == "ready"
     assert runner.state["decision"] is None
+    runner.state["browser"].act.assert_not_called()
+
+
+SECRET = "s3cret-value"
+
+
+def secret_page(url="https://example.test/login"):
+    state = page()
+    state["url"] = url
+    state["actions"].insert(
+        0, {"id": "e0", "kind": "fill", "label": "Password", "role": "textbox", "value": "", "node": 30, "secret": True}
+    )
+    state["fingerprint"] = fingerprint(state)
+    return state
+
+
+def use_page(runner, p, choice_id):
+    runner.state["page"] = p
+    runner.state["browser"].observe.return_value = p
+    runner.state["decision"] = decision(choice_id)
+
+
+def test_secret_field_types_local_value_and_never_calls_or_logs_it(runner, monkeypatch):
+    helper = Mock()
+    monkeypatch.setattr(loop, "field_text", helper)
+    runner.secret = SECRET
+    use_page(runner, secret_page(), "e0")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    helper.assert_not_called()
+    assert runner.state["browser"].act.call_args.kwargs["text"] == SECRET
+    assert runner.state["history"][-1]["text"] == "***"
+    assert SECRET not in json.dumps(runner.snapshot(), default=str)
+
+
+def test_secret_is_refused_on_another_origin(runner, monkeypatch):
+    monkeypatch.setattr(loop, "field_text", Mock())
+    runner.secret = SECRET
+    use_page(runner, secret_page("https://evil.example/login"), "e0")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "blocked"
+    assert "origin" in runner.state["blocked_reason"]
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_secret_field_without_secret_blocks_before_any_model_call(runner, monkeypatch):
+    helper = Mock()
+    monkeypatch.setattr(loop, "field_text", helper)
+    use_page(runner, secret_page(), "e0")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "blocked"
+    assert "--secret-env" in runner.state["blocked_reason"]
+    helper.assert_not_called()
     runner.state["browser"].act.assert_not_called()

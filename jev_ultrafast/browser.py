@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from browser_harness.admin import ensure_daemon
-from browser_harness.helpers import cdp
+from browser_harness.helpers import cdp, drain_events
 
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
@@ -25,6 +25,9 @@ class Browser:
         self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
         # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
         self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+        # Runtime -> consoleAPICalled + exceptionThrown; Log -> network/CSP/deprecation entries.
+        self.call("Runtime.enable")
+        self.call("Log.enable")
         self.call("Page.navigate", url=url)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -106,10 +109,59 @@ class Browser:
         self.after_input = action if action["kind"] != "wait" else None
         return result
 
+    def console_events(self):
+        """Console entries captured on this session since the previous drain."""
+        return [
+            entry
+            for event in drain_events()
+            if event.get("session_id") == self.session
+            and event.get("method") in CONSOLE_METHODS
+            and (entry := console_entry(event)) is not None
+        ]
+
     def close(self):
         if self.target:
             cdp("Target.closeTarget", targetId=self.target)
             self.target = None
+
+
+CONSOLE_METHODS = {"Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"}
+
+
+def console_entry(event):
+    """Normalize a CDP event into one console.jsonl line, or None if it is not one."""
+    method, params = event.get("method"), event.get("params", {})
+    if method == "Runtime.consoleAPICalled":
+        args = [str(a.get("value", a.get("description", ""))) for a in params.get("args", [])]
+        frames = (params.get("stackTrace") or {}).get("callFrames") or [{}]
+        return {
+            "kind": "console",
+            "level": params.get("type"),
+            "text": " ".join(args).strip(),
+            "url": frames[0].get("url"),
+            "line": frames[0].get("lineNumber"),
+        }
+    if method == "Runtime.exceptionThrown":
+        details = params.get("exceptionDetails", {})
+        exception = details.get("exception") or {}
+        return {
+            "kind": "exception",
+            "level": "error",
+            "text": exception.get("description") or details.get("text"),
+            "url": details.get("url"),
+            "line": details.get("lineNumber"),
+        }
+    if method == "Log.entryAdded":
+        entry = params.get("entry", {})
+        return {
+            "kind": "log",
+            "level": entry.get("level"),
+            "source": entry.get("source"),
+            "text": entry.get("text"),
+            "url": entry.get("url"),
+            "line": entry.get("lineNumber"),
+        }
+    return None
 
 
 def fingerprint(state):

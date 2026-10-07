@@ -28,7 +28,9 @@ class Browser:
         # Runtime -> consoleAPICalled + exceptionThrown; Log -> network/CSP/deprecation entries.
         self.call("Runtime.enable")
         self.call("Log.enable")
-        self.call("Page.navigate", url=url)
+        # next dev compiles a route on its first hit; Page.navigate only answers once the server
+        # responds, well past browser_harness's 5 s IPC default.
+        cdp("Page.navigate", session_id=self.session, _response_timeout=60, url=url)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if self.evaluate("document.readyState") == "complete":

@@ -9,6 +9,8 @@ from .browser import Browser, StalePage
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
+STOPPED = {"done", "blocked", "unverified"}
+
 
 def origin(url):
     parts = urlsplit(url)
@@ -16,7 +18,7 @@ def origin(url):
 
 
 class Agent:
-    def __init__(self, url, goals, *, record_dir=None, screenshots=False, secret=None):
+    def __init__(self, url, goals, *, record_dir=None, screenshots=False, secret=None, expect=()):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
             raise ValueError("Supply a task")
@@ -24,6 +26,7 @@ class Agent:
         self.pending_text = None
         # The secret never reaches a model, the trace or the summary; it is typed only on the start origin.
         self.secret = secret
+        self.expect = tuple(expect)
         self.origin = origin(url)
         self.browser = Browser(url)
         self.record_dir = Path(record_dir) if record_dir else None
@@ -79,7 +82,7 @@ class Agent:
             if not state["browser"].fresh(state["page"]):
                 state["page"] = state["browser"].observe(screenshot=self.screenshots)
             state["decision"] = None
-            if state["status"] in {"done", "blocked"}:
+            if state["status"] in STOPPED:
                 raise ValueError("This run has stopped. Start a fresh demo.")
             if len(state["decisions"]) >= MAX_STEPS * 2:
                 raise ValueError("Reached the demo's model-call budget")
@@ -100,11 +103,18 @@ class Agent:
             state["decision"] = None
             selected = decision["choice"]
             if selected in {"DONE", "BLOCKED"}:
+                # A claim made on a page still loading is not a claim: wait, then re-check the same page.
+                if selected == "DONE" and not state["browser"].settle():
+                    state["status"] = "ready"
+                    raise StalePage("Page still changing at DONE. Choose again.")
                 if not state["browser"].fresh(page):
                     state["status"] = "ready"
                     raise StalePage("Page changed since the decision. Choose again.")
                 state["status"] = "done" if selected == "DONE" else "blocked"
-                state["plan_index"] = int(selected == "DONE")
+                missing = [t for t in self.expect if t not in page["text"]] if selected == "DONE" else []
+                if missing:
+                    state["status"], state["missing_expect"] = "unverified", missing
+                state["plan_index"] = int(state["status"] == "done")
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
             action = next(a for a in page["actions"] if a["id"] == selected)
@@ -155,6 +165,7 @@ class Agent:
                     "elapsed_ms": state["elapsed_ms"],
                 }
             )
+            state["history"][-1]["settled"] = state["browser"].settle()
             state["page"] = state["browser"].observe(screenshot=self.screenshots)
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
@@ -184,7 +195,7 @@ class Agent:
         return None
 
     def run(self):
-        while self.state["status"] not in {"done", "blocked"}:
+        while self.state["status"] not in STOPPED:
             yield self.command("tick")
 
     def close(self):

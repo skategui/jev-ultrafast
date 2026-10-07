@@ -13,6 +13,18 @@ from browser_harness.helpers import cdp, drain_events
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
+# Counts fetch/XHR in flight so a page still loading its data never looks settled.
+NET_PROBE = """(() => { if (window.__jevNet) return; const n = window.__jevNet = {inflight: 0};
+  const f = window.fetch;
+  if (f) window.fetch = function (...a) { n.inflight++; return f.apply(this, a).finally(() => n.inflight--); };
+  const send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function (...a) {
+    n.inflight++; this.addEventListener('loadend', () => n.inflight--, {once: true}); return send.apply(this, a);
+  };
+})()"""
+SETTLE_STATE = f"[{MARKER}, window.__jevNet?.inflight ?? 0]"
+
+
 class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
 
@@ -28,6 +40,8 @@ class Browser:
         # Runtime -> consoleAPICalled + exceptionThrown; Log -> network/CSP/deprecation entries.
         self.call("Runtime.enable")
         self.call("Log.enable")
+        self.call("Page.enable")
+        self.call("Page.addScriptToEvaluateOnNewDocument", source=NET_PROBE)
         # next dev compiles a route on its first hit; Page.navigate only answers once the server
         # responds, well past browser_harness's 5 s IPC default.
         cdp("Page.navigate", session_id=self.session, _response_timeout=60, url=url)
@@ -89,6 +103,27 @@ class Browser:
                     raise
                 time.sleep(0.02)
         raise StalePage("Page did not settle")
+
+    def settle(self, quiet=0.3, timeout=5.0):
+        """True once the page stayed identical for `quiet` s with no fetch/XHR in flight; False at `timeout`.
+
+        ponytail: a page that long-polls over fetch never settles and costs `timeout` per step;
+        exclude such requests from NET_PROBE if one shows up.
+        """
+        deadline = time.monotonic() + timeout
+        last, since = object(), time.monotonic()
+        while time.monotonic() < deadline:
+            try:
+                current = self.evaluate(SETTLE_STATE)
+            except StalePage:
+                current = None
+            now = time.monotonic()
+            if current != last:
+                last, since = current, now
+            elif current and current[0] is not None and not current[1] and now - since >= quiet:
+                return True
+            time.sleep(0.05)
+        return False
 
     def fresh(self, page, action=None):
         if action is not None and action["kind"] in {"click", "select"}:

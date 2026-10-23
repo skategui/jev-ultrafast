@@ -113,7 +113,8 @@ def main() -> int:
                         help="env var holding the password; typed by code on the start origin only, "
                              "never sent to a model nor written to the trace")
     parser.add_argument("--expect", action="append", default=[], metavar="TEXT",
-                        help="text that must be visible for DONE to count (repeatable); else status=unverified")
+                        help="text that must be visible for DONE to count (repeatable); else status=unverified. "
+                             "missing_expect is reported for every stop, blocked included")
     args = parser.parse_args()
 
     out = pathlib.Path(args.out).expanduser().resolve()
@@ -215,7 +216,8 @@ def main() -> int:
         "chrome_left_running": bool(args.keep_chrome and cdp_url),
         "steps_executed": logged,
         "expect": args.expect,
-        "missing_expect": final.get("missing_expect", []),
+        # null = the run ended before a final page was read: nothing was checked.
+        "missing_expect": final.get("missing_expect"),
         "blocked_reason": final.get("blocked_reason"),
         "wall_ms": round((time.time() - started) * 1000),
         "final_page": {k: page.get(k) for k in PAGE_KEYS if k in page},

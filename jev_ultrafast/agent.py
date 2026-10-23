@@ -58,6 +58,8 @@ class Agent:
     def snapshot(self):
         return {
             **{k: v for k, v in self.state.items() if k != "browser"},
+            # Every stop says which promised texts the last observed page lacks, not only DONE.
+            "missing_expect": [t for t in self.expect if t not in self.state["page"].get("text", "")],
             "elements": action_space(self.state["page"]["actions"])[0],
         }
 

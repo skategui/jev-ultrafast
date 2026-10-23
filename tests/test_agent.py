@@ -395,6 +395,15 @@ def test_done_requires_every_expected_text_on_the_page(runner, expected, status)
     assert runner.state.get("missing_expect", []) == [t for t in expected if t != "Search"]
 
 
+@pytest.mark.parametrize("expected, missing", [(["Search"], []), (["Search", "Parcours"], ["Parcours"])])
+def test_a_blocked_stop_still_reports_the_missing_expected_texts(runner, expected, missing):
+    runner.expect = expected
+    runner.state["decision"] = decision("BLOCKED")
+    final = runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "blocked"
+    assert final["missing_expect"] == missing
+
+
 def test_each_action_waits_for_the_page_to_settle_before_observing(runner):
     order = []
     runner.state["browser"].settle = Mock(side_effect=lambda: order.append("settle") or True)

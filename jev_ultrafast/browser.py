@@ -1,7 +1,9 @@
 """Observed actions through Browser Harness; one CDP session, no per-step subprocess."""
 
+import base64
 import hashlib
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -40,6 +42,9 @@ class Browser:
         # Runtime -> consoleAPICalled + exceptionThrown; Log -> network/CSP/deprecation entries.
         self.call("Runtime.enable")
         self.call("Log.enable")
+        # Network -> network.jsonl: status, GraphQL operation and error codes; never bodies or headers.
+        self.requests = {}
+        self.call("Network.enable")
         self.call("Page.enable")
         self.call("Page.addScriptToEvaluateOnNewDocument", source=NET_PROBE)
         # next dev compiles a route on its first hit; Page.navigate only answers once the server
@@ -146,15 +151,59 @@ class Browser:
         self.after_input = action if action["kind"] != "wait" else None
         return result
 
-    def console_events(self):
-        """Console entries captured on this session since the previous drain."""
-        return [
-            entry
-            for event in drain_events()
-            if event.get("session_id") == self.session
-            and event.get("method") in CONSOLE_METHODS
-            and (entry := console_entry(event)) is not None
-        ]
+    def drain(self):
+        """Console and network entries captured on this session since the previous drain."""
+        console, network = [], []
+        for event in drain_events():
+            if event.get("session_id") != self.session:
+                continue
+            method = event.get("method")
+            if method in CONSOLE_METHODS and (entry := console_entry(event)) is not None:
+                console.append(entry)
+            elif method in NETWORK_METHODS and (entry := self.network_entry(method, event.get("params", {}))):
+                network.append(entry)
+        return console, network
+
+    def network_entry(self, method, params):
+        """Fold one request's events into a network.jsonl line, returned once it has finished."""
+        request_id = params.get("requestId")
+        if method == "Network.requestWillBeSent":
+            request = params.get("request", {})
+            entry = {
+                "type": params.get("type"),
+                "method": request.get("method"),
+                # The query string can carry tokens or ids: scheme, host and path only.
+                "url": request.get("url", "").split("#")[0].split("?")[0],
+            }
+            if operation := graphql_operation(request.get("postData")):
+                entry["operation"] = operation
+            self.requests[request_id] = entry
+            return None
+        entry = self.requests.get(request_id)
+        if entry is None:
+            return None
+        if method == "Network.responseReceived":
+            response = params.get("response", {})
+            entry["status"] = response.get("status")
+            entry["_json"] = "json" in (response.get("mimeType") or "")
+            return None
+        del self.requests[request_id]
+        is_json = entry.pop("_json", False)
+        status = entry.get("status") or 0
+        if method == "Network.loadingFailed":
+            entry["failed"] = params.get("errorText")
+        elif is_json and entry["type"] in ("Fetch", "XHR") and (status >= 400 or "operation" in entry):
+            entry.update(error_codes(self.response_body(request_id)))
+        # shortcut: requests still open at the last drain (sockets, long polls) are dropped.
+        return entry if entry["type"] in DATA_TYPES or "failed" in entry or status >= 400 else None
+
+    def response_body(self, request_id):
+        try:
+            body = self.call("Network.getResponseBody", requestId=request_id)
+        except Exception:  # noqa: BLE001 - evicted after a navigation: the line keeps its status
+            return None
+        text = body.get("body") or ""
+        return base64.b64decode(text).decode("utf-8", "replace") if body.get("base64Encoded") else text
 
     def close(self):
         if self.target:
@@ -163,6 +212,43 @@ class Browser:
 
 
 CONSOLE_METHODS = {"Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"}
+NETWORK_METHODS = {
+    "Network.requestWillBeSent",
+    "Network.responseReceived",
+    "Network.loadingFinished",
+    "Network.loadingFailed",
+}
+# The page itself and its data calls; scripts, styles and images only when they fail.
+DATA_TYPES = {"Document", "Fetch", "XHR"}
+CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+
+
+def graphql_operation(post_data):
+    """The GraphQL operation name(s) a request body names, or None."""
+    try:
+        payload = json.loads(post_data) if post_data else None
+    except ValueError:
+        return None
+    batch = payload if isinstance(payload, list) else [payload]
+    names = [p["operationName"] for p in batch if isinstance(p, dict) and isinstance(p.get("operationName"), str)]
+    return ",".join(names) or None
+
+
+def error_codes(text):
+    """Machine codes of a JSON answer (`code`, GraphQL `errors[].extensions.code`), never its data or messages."""
+    try:
+        payload = json.loads(text) if text else None
+    except ValueError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    codes = {}
+    if isinstance(payload.get("code"), str) and CODE.match(payload["code"]):
+        codes["code"] = payload["code"]
+    if isinstance(payload.get("errors"), list):
+        found = [((e.get("extensions") or {}).get("code") if isinstance(e, dict) else None) for e in payload["errors"]]
+        codes["graphql_errors"] = [c if isinstance(c, str) and CODE.match(c) else "UNKNOWN" for c in found]
+    return codes
 
 
 def console_entry(event):

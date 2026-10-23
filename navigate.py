@@ -6,6 +6,8 @@ Runs ONE bounded navigation goal against a page and writes an auditable trace:
     <out>/trace.jsonl    one JSON object per EXECUTED action (not per decision)
     <out>/summary.json   status, counters, final url/title, the screenshots' names
     <out>/console.jsonl  console calls, uncaught exceptions and browser log entries
+    <out>/network.jsonl  one line per finished document/fetch/XHR (and failed asset): method, url
+                         without query, status, GraphQL operation, error codes. Never bodies.
     <out>/<ms>.jpg       the frames Jev records when `record_dir` is set
 
 Split of duties: Jev decides *which operation on which element* and acts; this script
@@ -129,6 +131,7 @@ def main() -> int:
     chrome_proc = None
     browser = None
     console_entries: list = []
+    network_entries: list = []
 
     try:
         cdp_url, chrome_proc = ensure_chrome(args.chrome_port, args.chrome_profile,
@@ -142,7 +145,9 @@ def main() -> int:
             browser = agent.browser
             while agent.state["status"] not in STOPPED:
                 state = agent.command("tick")
-                console_entries += agent.browser.console_events()
+                console, network = agent.browser.drain()
+                console_entries += console
+                network_entries += network
                 page = state.get("page") or page
                 history = state.get("history") or []
                 for step in history[logged:]:
@@ -170,7 +175,9 @@ def main() -> int:
         # The daemon buffers events; this last drain also covers a crash mid-loop.
         if browser is not None:
             try:
-                console_entries += browser.console_events()
+                console, network = browser.drain()
+                console_entries += console
+                network_entries += network
             except Exception:
                 pass
         if chrome_proc is not None:
@@ -185,11 +192,22 @@ def main() -> int:
         for entry in console_entries:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    network_log = out / "network.jsonl"
+    with network_log.open("w", encoding="utf-8") as handle:
+        for entry in network_entries:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
     summary = {
         "status": status,
         "error": error,
         "console_errors": sum(1 for e in console_entries if e.get("level") == "error"),
         "console_log": str(console_log),
+        "network_requests": len(network_entries),
+        "network_errors": sum(
+            1 for e in network_entries
+            if e.get("failed") or (e.get("status") or 0) >= 400 or e.get("code") or e.get("graphql_errors")
+        ),
+        "network_log": str(network_log),
         "goal": args.goal,
         "start_url": args.url,
         "cdp_url": cdp_url,

@@ -18,7 +18,7 @@ def origin(url):
 
 
 class Agent:
-    def __init__(self, url, goals, *, record_dir=None, screenshots=False, secret=None, expect=()):
+    def __init__(self, url, goals, *, record_dir=None, screenshots=False, secret=None, expect=(), expect_in=()):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
             raise ValueError("Supply a task")
@@ -27,6 +27,8 @@ class Agent:
         # The secret never reaches a model, the trace or the summary; it is typed only on the start origin.
         self.secret = secret
         self.expect = tuple(expect)
+        # (region name, text) pairs: the text counts only inside a region with exactly that accessible name.
+        self.expect_in = tuple((region, text) for region, text in expect_in)
         self.origin = origin(url)
         self.browser = Browser(url)
         self.record_dir = Path(record_dir) if record_dir else None
@@ -59,7 +61,7 @@ class Agent:
         return {
             **{k: v for k, v in self.state.items() if k != "browser"},
             # Every stop says which promised texts the last observed page lacks, not only DONE.
-            "missing_expect": [t for t in self.expect if t not in self.state["page"].get("text", "")],
+            "missing_expect": self.missing(self.state["page"]),
             "elements": action_space(self.state["page"]["actions"])[0],
         }
 
@@ -113,7 +115,7 @@ class Agent:
                     state["status"] = "ready"
                     raise StalePage("Page changed since the decision. Choose again.")
                 state["status"] = "done" if selected == "DONE" else "blocked"
-                missing = [t for t in self.expect if t not in page["text"]] if selected == "DONE" else []
+                missing = self.missing(page) if selected == "DONE" else []
                 if missing:
                     state["status"], state["missing_expect"] = "unverified", missing
                 state["plan_index"] = int(state["status"] == "done")
@@ -188,6 +190,16 @@ class Agent:
         else:
             raise ValueError("Unknown command")
         return self.snapshot()
+
+    def missing(self, page):
+        """Promised texts the page lacks: plain strings, then scoped misses as {region, text}."""
+        regions = page.get("regions") or []
+        return [t for t in self.expect if t not in page.get("text", "")] + [
+            {"region": region, "text": text}
+            for region, text in self.expect_in
+            # Same whitespace normalisation as snapshot.js; a match elsewhere on the page never counts.
+            if not any(r["name"] == " ".join(region.split()) and text in r["text"] for r in regions)
+        ]
 
     def secret_refusal(self, page):
         if self.secret is None:

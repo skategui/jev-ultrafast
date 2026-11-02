@@ -164,6 +164,7 @@ def runner():
     a.pending_text = None
     a.secret = None
     a.expect = ()
+    a.expect_in = ()
     a.origin = "https://example.test"
     p = page()
     a.state = {
@@ -393,6 +394,23 @@ def test_done_requires_every_expected_text_on_the_page(runner, expected, status)
     runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     assert runner.state["status"] == status
     assert runner.state.get("missing_expect", []) == [t for t in expected if t != "Search"]
+
+
+@pytest.mark.parametrize(
+    "regions, status, missing",
+    [
+        ([{"name": "Filtres", "text": "Catégories"}], "unverified", [{"region": "Panneau", "text": "Catégories"}]),
+        ([{"name": "Panneau", "text": "Catégories"}], "done", []),
+    ],
+)
+def test_done_with_a_scoped_text_only_elsewhere_is_unverified(runner, regions, status, missing):
+    runner.expect_in = (("Panneau", "Catégories"),)
+    runner.state["page"]["regions"] = regions
+    runner.state["decision"] = decision("DONE")
+    runner.state["browser"].settle = Mock(return_value=True)
+    final = runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == status
+    assert final["missing_expect"] == missing
 
 
 @pytest.mark.parametrize("expected, missing", [(["Search"], []), (["Search", "Parcours"], ["Parcours"])])

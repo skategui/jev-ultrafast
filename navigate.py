@@ -21,7 +21,8 @@ Otherwise a Chrome already listening on `--chrome-port` is reused and ALSO left 
 none answers, this script launches its own (dedicated profile) and kills it on exit. It
 never kills a Chrome it did not start.
 
-Exit codes: 0 = done, 2 = blocked, 3 = error/exception, 4 = done claimed but an --expect text is missing.
+Exit codes: 0 = done, 2 = blocked, 3 = error/exception,
+4 = done claimed but an --expect / --expect-in text is missing.
 """
 
 from __future__ import annotations
@@ -113,8 +114,16 @@ def main() -> int:
                         help="env var holding the password; typed by code on the start origin only, "
                              "never sent to a model nor written to the trace")
     parser.add_argument("--expect", action="append", default=[], metavar="TEXT",
-                        help="text that must be visible for DONE to count (repeatable); else status=unverified. "
+                        help="text that must be visible anywhere on the screen for DONE to count (repeatable); "
+                             "else status=unverified. Hidden text (display:none, hidden, aria-hidden, "
+                             "visibility:hidden, opacity:0) and text outside the viewport never count. "
                              "missing_expect is reported for every stop, blocked included")
+    parser.add_argument("--expect-in", action="append", nargs=2, default=[], metavar=("REGION", "TEXT"),
+                        help="like --expect, but TEXT counts only inside a visible dialog, aside, section or "
+                             "[role=dialog|alertdialog|complementary|region] whose accessible name is exactly "
+                             "REGION (aria-labelledby, else aria-label, else its first visible heading; "
+                             "whitespace collapsed). Repeatable. "
+                             'A miss appears in missing_expect as {"region": REGION, "text": TEXT}')
     args = parser.parse_args()
 
     out = pathlib.Path(args.out).expanduser().resolve()
@@ -142,7 +151,8 @@ def main() -> int:
             secret = os.environ.get(args.secret_env)
             if not secret:
                 raise ValueError(f"--secret-env {args.secret_env}: variable is unset or empty")
-        with Agent(args.url, args.goal, record_dir=out, secret=secret, expect=args.expect) as agent:
+        with Agent(args.url, args.goal, record_dir=out, secret=secret, expect=args.expect,
+                   expect_in=args.expect_in) as agent:
             browser = agent.browser
             while agent.state["status"] not in STOPPED:
                 state = agent.command("tick")
@@ -216,7 +226,9 @@ def main() -> int:
         "chrome_left_running": bool(args.keep_chrome and cdp_url),
         "steps_executed": logged,
         "expect": args.expect,
+        "expect_in": [{"region": region, "text": text} for region, text in args.expect_in],
         # null = the run ended before a final page was read: nothing was checked.
+        # Strings are --expect misses; {"region", "text"} objects are --expect-in misses.
         "missing_expect": final.get("missing_expect"),
         "blocked_reason": final.get("blocked_reason"),
         "wall_ms": round((time.time() - started) * 1000),

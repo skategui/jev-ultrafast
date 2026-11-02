@@ -91,6 +91,21 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
+### Expected text
+
+`navigate.py` checks promised text when the run stops. A `DONE` with a missing text becomes `status=unverified`, exit code 4.
+
+```bash
+uv run --env-file .env python navigate.py --url http://127.0.0.1:3000 --out /tmp/run \
+  --goal 'Open the client panel' \
+  --expect 'Jane Doe' \
+  --expect-in 'Client panel' 'Catégories'
+```
+
+- `--expect TEXT` passes if TEXT is visible anywhere on screen. Text that is hidden (`display:none`, `hidden`, `aria-hidden`, `visibility:hidden`, `opacity:0`) or outside the viewport never counts.
+- `--expect-in REGION TEXT` passes only if TEXT is visible inside a `dialog`, `aside`, `section` or `[role=dialog|alertdialog|complementary|region]` whose accessible name is exactly REGION. The name comes from `aria-labelledby`, else `aria-label`, else the first visible heading, with whitespace collapsed. A same-named filter label elsewhere on the page does not satisfy it.
+- `summary.json` lists both in `expect` and `expect_in`. `missing_expect` is checked on every stop: an `--expect` miss is a string and an `--expect-in` miss is `{"region": REGION, "text": TEXT}`. `null` means no final page was read.
+
 ## Why it moves
 
 - **One request per decision cycle.** Operation and target heads share the same observed state.

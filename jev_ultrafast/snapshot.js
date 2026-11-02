@@ -83,16 +83,30 @@
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
+  // Named containers a scoped expectation (--expect-in) binds to; never part of the freshness marker.
+  const REGIONS='dialog,[role="dialog"],[role="alertdialog"],aside,[role="complementary"],[role="region"],section';
+  const HEADINGS='h1,h2,h3,h4,h5,h6,[role="heading"]';
+  // Not name(): its last fallback is the whole subtree text, which would make any text a region name.
+  const regionName = e => ((e.getAttribute('aria-labelledby')||'').split(/\s+/)
+    .map(id=>document.getElementById(id)?.textContent||'').join(' ').trim() || e.getAttribute('aria-label') ||
+    [...e.querySelectorAll(HEADINGS)].find(visible)?.textContent || '').replace(/\s+/g,' ').trim();
+  const regionWords=new Map();
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
   const range=document.createRange(); let node,length=0;
+  // shortcut: regions share the 6000-char cap (false fail, never false pass); own walk per region if it bites.
   while ((node=walker.nextNode()) && length<6000) {
     const value=node.textContent.trim(), parent=node.parentElement;
     if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
     range.selectNodeContents(node); const r=range.getBoundingClientRect();
     if (r.width>0 && r.height>0 && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth) {
       words.push(value); length+=value.length;
+      for (let e=parent.closest(REGIONS); e; e=e.parentElement?.closest(REGIONS)) {
+        if (!regionWords.has(e)) regionWords.set(e,{name:regionName(e),words:[]});
+        regionWords.get(e).words.push(value);
+      }
     }
   }
+  const regions=[...regionWords.values()].filter(r=>r.name).map(r=>({name:r.name,text:r.words.join('\n')}));
   const text=words.join('\n').slice(0,6000), height=document.documentElement.scrollHeight;
   const page_key=cache.pageKey(), guards={};
   for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node));
@@ -106,6 +120,6 @@
   if (scrollY+innerHeight<height-2) actions.push({id:'scroll_down',kind:'scroll',label:'Scroll down',delta:560});
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});
   actions.push({id:'wait',kind:'wait',label:'Wait for the page to update'});
-  return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
+  return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,regions,
     scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions};
 })()

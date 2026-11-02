@@ -15,16 +15,24 @@ from browser_harness.helpers import cdp, drain_events
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
-# Counts fetch/XHR in flight so a page still loading its data never looks settled.
-NET_PROBE = """(() => { if (window.__jevNet) return; const n = window.__jevNet = {inflight: 0};
+# Start time of each fetch/XHR in flight and when the last one ended, so a page still loading its data
+# never looks settled while background traffic (long polls, retries, refetches) can be told apart by age.
+NET_PROBE = """(() => { if (window.__jevNet) return; const n = window.__jevNet = {open: new Set(), end: -1e9};
+  const start = () => { const r = {t: performance.now()}; n.open.add(r);
+    return () => { n.open.delete(r); n.end = performance.now(); }; };
   const f = window.fetch;
-  if (f) window.fetch = function (...a) { n.inflight++; return f.apply(this, a).finally(() => n.inflight--); };
+  if (f) window.fetch = function (...a) { const done = start(); return f.apply(this, a).finally(done); };
   const send = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function (...a) {
-    n.inflight++; this.addEventListener('loadend', () => n.inflight--, {once: true}); return send.apply(this, a);
+    this.addEventListener('loadend', start(), {once: true}); return send.apply(this, a);
   };
 })()"""
-SETTLE_STATE = f"[{MARKER}, window.__jevNet?.inflight ?? 0]"
+# A request older than this is background traffic, not the data the page is about to show.
+BACKGROUND_S = 1.2
+SETTLE_STATE = f"""(() => {{ const n = window.__jevNet, now = performance.now(), marker = {MARKER};
+  return n ? [marker, [...n.open].filter(r => now - r.t < {BACKGROUND_S * 1000}).length, now - n.end]
+    : [marker, 0, 1e9];
+}})()"""
 
 
 class StalePage(ValueError):
@@ -110,22 +118,25 @@ class Browser:
         raise StalePage("Page did not settle")
 
     def settle(self, quiet=0.3, timeout=5.0):
-        """True once the page stayed identical for `quiet` s with no fetch/XHR in flight; False at `timeout`.
+        """True once the page stayed identical for `quiet` s, no fetch/XHR younger than BACKGROUND_S is in
+        flight and none ended in the last `quiet` s; False at `timeout`.
 
-        ponytail: a page that long-polls over fetch never settles and costs `timeout` per step;
-        exclude such requests from NET_PROBE if one shows up.
+        shortcut: a genuine data request slower than BACKGROUND_S counts as background, so settle() (and DONE)
+        can pass while its spinner shows; raise BACKGROUND_S if a slow API needs it.
         """
         deadline = time.monotonic() + timeout
         last, since = object(), time.monotonic()
         while time.monotonic() < deadline:
             try:
-                current = self.evaluate(SETTLE_STATE)
+                marker, young, idle_ms = self.evaluate(SETTLE_STATE)
             except StalePage:
-                current = None
+                marker = young = idle_ms = None
             now = time.monotonic()
-            if current != last:
-                last, since = current, now
-            elif current and current[0] is not None and not current[1] and now - since >= quiet:
+            # Only the page itself restarts the quiet window: a request ageing into background must not.
+            if marker != last:
+                last, since = marker, now
+            # The quiet after the last response covers the app's render, which runs after the probe's finally.
+            elif marker is not None and not young and idle_ms >= quiet * 1000 and now - since >= quiet:
                 return True
             time.sleep(0.05)
         return False

@@ -310,8 +310,20 @@ def browser_operation(request):
     if operation == "act":
         action = request["action"]
         kind = action["kind"]
-        if kind == "scroll":
+        if kind == "scroll" and action.get("node") is None:
             call("Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0, deltaY=action["delta"])
+        elif kind == "scroll":
+            if type(action["node"]) is not int:
+                raise ValueError("Invalid observed node")
+            # A wheel lands on whatever is under the pointer; scrollBy moves exactly the observed container.
+            moved = evaluate("""(action => {
+              const e=window.__jevFast?.nodes.get(action.node);
+              if (!e?.isConnected || !e.checkVisibility()) return null;
+              e.scrollBy({[action.axis==='x' ? 'left' : 'top']: action.delta, behavior: 'instant'});
+              return true;
+            })(""" + json.dumps(action) + ")")
+            if moved is None:
+                raise StalePage("Scroll container changed. Observe again.")
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
